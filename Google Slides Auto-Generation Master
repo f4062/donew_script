@@ -256,6 +256,7 @@ function generatePresentation() {
 
 // --- 5. カスタムメニュー設定関数 ---
 function onOpen(e) {
+  // (A) onOpen が未定義の場合はこのブロックを新規追加してください。
   SlidesApp.getUi()
     .createMenu('カスタム設定')
     .addItem('🎨 スライドを生成', 'generatePresentation')
@@ -266,8 +267,87 @@ function onOpen(e) {
       .addItem('フッターテキスト', 'setFooterText')
       .addItem('ヘッダーロゴ', 'setHeaderLogo')
       .addItem('クロージングロゴ', 'setClosingLogo'))
+    // (B) 既存メニューに追記する場合は以下の addItem を追加してください。
+    .addItem('∑ 数式(PNG)を挿入', 'insertHumidityExample')
     .addItem('🔄 リセット', 'resetSettings')
     .addToUi();
+}
+
+/**
+ * 任意の TeX 文字列を CodeCogs でレンダリングし、PNG 画像としてスライドに挿入する汎用関数。
+ * 日本語の長文はフォントが潰れる場合があるため、数式のみ画像化しテキストは別のテキストボックスで併記する運用を推奨します。
+ *
+ * @param {string} tex - TeX 文字列。% などは \% のようにエスケープしてください。
+ * @param {Object} [opt]
+ * @param {number} [opt.slideIndex] - 0 始まりのスライド番号。範囲外の場合は最寄りに丸めます。
+ * @param {number} [opt.dpi=300] - 出力解像度。
+ * @param {string} [opt.size='\\large'] - CodeCogs に渡すサイズコマンド（例: String.raw`\\Large `）。
+ * @param {number} [opt.left=50] - 挿入位置（pt）。
+ * @param {number} [opt.top=120] - 挿入位置（pt）。
+ * @return {SlidesApp.Image}
+ */
+function insertLatexPng(tex, opt) {
+  if (typeof tex !== 'string' || tex.trim() === '') {
+    throw new Error('TeX 文字列が指定されていません。');
+  }
+
+  const options = opt || {};
+  const presentation = SlidesApp.getActivePresentation();
+  const slides = presentation.getSlides();
+  if (slides.length === 0) {
+    throw new Error('挿入可能なスライドがありません。');
+  }
+
+  const dpiValue = Number(options.dpi);
+  const dpi = Number.isFinite(dpiValue) ? Math.max(72, Math.round(dpiValue)) : 300;
+  const sizeDirective = typeof options.size === 'string' && options.size !== '' ? options.size : '\\large';
+  const requestedIndex = Number(options.slideIndex);
+  const normalizedSlideIndex = Number.isFinite(requestedIndex) ? Math.round(requestedIndex) : 0;
+  const clampedIndex = Math.min(Math.max(normalizedSlideIndex, 0), slides.length - 1);
+  const slide = slides[clampedIndex];
+
+  const latexSource = `\\dpi{${dpi}}${sizeDirective}${tex}`;
+  const encoded = encodeURIComponent(latexSource);
+  const url = `https://latex.codecogs.com/png.latex?${encoded}`;
+
+  const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`LaTeX 画像の取得に失敗しました (HTTP ${response.getResponseCode()})`);
+  }
+
+  const headers = response.getHeaders();
+  const contentType = (headers['Content-Type'] || headers['content-type'] || '').toString();
+  if (!contentType.startsWith('image/')) {
+    throw new Error('取得したレスポンスが画像ではありません。');
+  }
+
+  const blob = response.getBlob().setName('latex.png');
+  const image = slide.insertImage(blob);
+
+  const leftValue = Number(options.left);
+  const topValue = Number(options.top);
+  const left = Number.isFinite(leftValue) ? leftValue : 50;
+  const top = Number.isFinite(topValue) ? topValue : 120;
+  image.setLeft(left);
+  image.setTop(top);
+
+  return image;
+}
+
+/**
+ * 湿度の例をデモとして挿入する関数。必要に応じて通常の文字列リテラル版に差し替えてください。
+ */
+function insertHumidityExample() {
+  // 下記 String.raw を通常の文字列リテラルに置き換える場合は、バックスラッシュを二重にエスケープしてください。
+  const tex = String.raw`\text{湿度}(\%) = \frac{8.7\,\mathrm{g/m^3}}{17.3\,\mathrm{g/m^3}} \times 100 \approx 50.29\%`;
+
+  insertLatexPng(tex, {
+    slideIndex: 0,
+    dpi: 300,
+    size: String.raw`\Large `,
+    left: 50,
+    top: 120
+  });
 }
 
 // プライマリカラー設定
