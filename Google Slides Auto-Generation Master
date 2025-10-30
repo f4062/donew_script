@@ -256,6 +256,7 @@ function generatePresentation() {
 
 // --- 5. カスタムメニュー設定関数 ---
 function onOpen(e) {
+  // (A) onOpen が未定義の場合はこのブロックを新規追加してください。
   SlidesApp.getUi()
     .createMenu('カスタム設定')
     .addItem('🎨 スライドを生成', 'generatePresentation')
@@ -266,8 +267,87 @@ function onOpen(e) {
       .addItem('フッターテキスト', 'setFooterText')
       .addItem('ヘッダーロゴ', 'setHeaderLogo')
       .addItem('クロージングロゴ', 'setClosingLogo'))
+    // (B) 既存メニューに追記する場合は以下の addItem を追加してください。
+    .addItem('∑ 数式(PNG)を挿入', 'insertHumidityExample')
     .addItem('🔄 リセット', 'resetSettings')
     .addToUi();
+}
+
+/**
+ * 任意の TeX 文字列を CodeCogs でレンダリングし、PNG 画像としてスライドに挿入する汎用関数。
+ * 日本語の長文はフォントが潰れる場合があるため、数式のみ画像化しテキストは別のテキストボックスで併記する運用を推奨します。
+ *
+ * @param {string} tex - TeX 文字列。% などは \% のようにエスケープしてください。
+ * @param {Object} [opt]
+ * @param {number} [opt.slideIndex] - 0 始まりのスライド番号。範囲外の場合は最寄りに丸めます。
+ * @param {number} [opt.dpi=300] - 出力解像度。
+ * @param {string} [opt.size='\\large'] - CodeCogs に渡すサイズコマンド（例: String.raw`\\Large `）。
+ * @param {number} [opt.left=50] - 挿入位置（pt）。
+ * @param {number} [opt.top=120] - 挿入位置（pt）。
+ * @return {SlidesApp.Image}
+ */
+function insertLatexPng(tex, opt) {
+  if (typeof tex !== 'string' || tex.trim() === '') {
+    throw new Error('TeX 文字列が指定されていません。');
+  }
+
+  const options = opt || {};
+  const presentation = SlidesApp.getActivePresentation();
+  const slides = presentation.getSlides();
+  if (slides.length === 0) {
+    throw new Error('挿入可能なスライドがありません。');
+  }
+
+  const dpiValue = Number(options.dpi);
+  const dpi = Number.isFinite(dpiValue) ? Math.max(72, Math.round(dpiValue)) : 300;
+  const sizeDirective = typeof options.size === 'string' && options.size !== '' ? options.size : '\\large';
+  const requestedIndex = Number(options.slideIndex);
+  const normalizedSlideIndex = Number.isFinite(requestedIndex) ? Math.round(requestedIndex) : 0;
+  const clampedIndex = Math.min(Math.max(normalizedSlideIndex, 0), slides.length - 1);
+  const slide = slides[clampedIndex];
+
+  const latexSource = `\\dpi{${dpi}}${sizeDirective}${tex}`;
+  const encoded = encodeURIComponent(latexSource);
+  const url = `https://latex.codecogs.com/png.latex?${encoded}`;
+
+  const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`LaTeX 画像の取得に失敗しました (HTTP ${response.getResponseCode()})`);
+  }
+
+  const headers = response.getHeaders();
+  const contentType = (headers['Content-Type'] || headers['content-type'] || '').toString();
+  if (!contentType.startsWith('image/')) {
+    throw new Error('取得したレスポンスが画像ではありません。');
+  }
+
+  const blob = response.getBlob().setName('latex.png');
+  const image = slide.insertImage(blob);
+
+  const leftValue = Number(options.left);
+  const topValue = Number(options.top);
+  const left = Number.isFinite(leftValue) ? leftValue : 50;
+  const top = Number.isFinite(topValue) ? topValue : 120;
+  image.setLeft(left);
+  image.setTop(top);
+
+  return image;
+}
+
+/**
+ * 湿度の例をデモとして挿入する関数。必要に応じて通常の文字列リテラル版に差し替えてください。
+ */
+function insertHumidityExample() {
+  // 下記 String.raw を通常の文字列リテラルに置き換える場合は、バックスラッシュを二重にエスケープしてください。
+  const tex = String.raw`\text{湿度}(\%) = \frac{8.7\,\mathrm{g/m^3}}{17.3\,\mathrm{g/m^3}} \times 100 \approx 50.29\%`;
+
+  insertLatexPng(tex, {
+    slideIndex: 0,
+    dpi: 300,
+    size: String.raw`\Large `,
+    left: 50,
+    top: 120
+  });
 }
 
 // プライマリカラー設定
@@ -1847,7 +1927,182 @@ try { textRange.getParagraphs().forEach(p => p.getRange().getParagraphStyle().se
 }
 }
 
+function splitTexSegments(raw) {
+const str = typeof raw === 'string' ? raw : '';
+const regex = /\$\$([\s\S]+?)\$\$/g;
+const segments = [];
+let lastIndex = 0;
+let match;
+while ((match = regex.exec(str)) !== null) {
+if (match.index > lastIndex) segments.push({ type: 'text', value: str.substring(lastIndex, match.index) });
+segments.push({ type: 'tex', value: (match[1] || '').trim() });
+lastIndex = match.index + match[0].length;
+}
+if (segments.length === 0) return null;
+if (lastIndex < str.length) segments.push({ type: 'text', value: str.substring(lastIndex) });
+return segments;
+}
+
+function extractTexExpressions(raw) {
+const segments = splitTexSegments(raw);
+if (!segments) return [];
+if (segments.some(seg => seg.type === 'text' && /\S/.test(seg.value || ''))) return [];
+return segments.filter(seg => seg.type === 'tex' && seg.value).map(seg => seg.value);
+}
+
+function buildTexImageUrl(formula) {
+const trimmed = String(formula || '').trim();
+const payload = '\\dpi{300} ' + trimmed;
+return 'https://latex.codecogs.com/png.image?' + encodeURIComponent(payload);
+}
+
+function removeExistingTexElements(page, markerPrefix) {
+if (!markerPrefix) return;
+try {
+const imgs = page.getImages();
+imgs.forEach(img => {
+try {
+const title = img.getTitle && img.getTitle();
+if (title && title.indexOf(markerPrefix) === 0) img.remove();
+} catch (e) {}
+});
+} catch (e) {}
+try {
+const shapes = page.getShapes();
+shapes.forEach(sh => {
+try {
+const title = sh.getTitle && sh.getTitle();
+if (title && title.indexOf(markerPrefix) === 0) sh.remove();
+} catch (e) {}
+});
+} catch (e) {}
+}
+
+function clearTexArtifacts(target) {
+if (!target || typeof target.getParentPage !== 'function' || typeof target.getObjectId !== 'function') return;
+const page = target.getParentPage();
+if (!page) return;
+const markerPrefix = '__TEX__:' + target.getObjectId();
+removeExistingTexElements(page, markerPrefix);
+}
+
+function renderTexStack(target, formulas, options) {
+if (!target || !formulas || formulas.length === 0) return false;
+if (typeof target.getParentPage !== 'function' || typeof target.getLeft !== 'function' || typeof target.getTop !== 'function') return false;
+if (typeof target.getWidth !== 'function' || typeof target.getHeight !== 'function') return false;
+
+const page = target.getParentPage();
+if (!page) return false;
+
+const markerPrefix = typeof target.getObjectId === 'function' ? '__TEX__:' + target.getObjectId() : null;
+removeExistingTexElements(page, markerPrefix);
+
+const padTop = options && options.paddingTop != null ? options.paddingTop : 6;
+const padBottom = options && options.paddingBottom != null ? options.paddingBottom : 6;
+const padLeft = options && options.paddingLeft != null ? options.paddingLeft : 6;
+const padRight = options && options.paddingRight != null ? options.paddingRight : 6;
+const allowUpscale = options && options.allowUpscale === true;
+const maxUpscale = options && options.maxUpscale ? options.maxUpscale : 1.5;
+
+const availableWidth = Math.max(4, target.getWidth() - padLeft - padRight);
+const availableHeight = Math.max(4, target.getHeight() - padTop - padBottom);
+const baseLeft = target.getLeft();
+const baseTop = target.getTop();
+
+const created = [];
+try {
+formulas.forEach((tex, idx) => {
+const url = buildTexImageUrl(tex);
+const image = page.insertImage(url);
+let width = image.getWidth();
+let height = image.getHeight();
+const widthScale = availableWidth / Math.max(1, width);
+if (widthScale < 1 || (allowUpscale && widthScale < maxUpscale)) {
+const scale = Math.min(widthScale, allowUpscale ? maxUpscale : 1);
+width = width * scale;
+height = height * scale;
+image.setWidth(width).setHeight(height);
+}
+created.push({ image, width: image.getWidth(), height: image.getHeight() });
+});
+
+if (created.length === 0) return false;
+
+const count = created.length;
+let gap = count > 1 ? (options && options.gap != null ? options.gap : 12) : 0;
+let totalHeight = created.reduce((sum, item) => sum + item.height, 0);
+let needed = totalHeight + gap * (count - 1);
+
+if (needed > availableHeight) {
+const scale = availableHeight / needed;
+created.forEach(item => {
+const newW = item.image.getWidth() * scale;
+const newH = item.image.getHeight() * scale;
+item.image.setWidth(newW).setHeight(newH);
+item.width = newW;
+item.height = newH;
+});
+totalHeight = created.reduce((sum, item) => sum + item.height, 0);
+gap *= scale;
+needed = totalHeight + gap * (count - 1);
+}
+
+const startY = baseTop + padTop + Math.max(0, (availableHeight - needed) / 2);
+const bulletOpt = options && options.bullet;
+const bulletColor = bulletOpt && bulletOpt.color ? bulletOpt.color : CONFIG.COLORS.text_primary;
+const bulletRadius = bulletOpt && bulletOpt.radius != null ? bulletOpt.radius : 3.5;
+const bulletOffset = bulletOpt && bulletOpt.centerOffset != null ? bulletOpt.centerOffset : (padLeft * 0.5);
+
+let y = startY;
+created.forEach((item, idx) => {
+const imgLeft = baseLeft + padLeft + (availableWidth - item.width) / 2;
+item.image.setLeft(imgLeft).setTop(y);
+if (markerPrefix) item.image.setTitle(markerPrefix + ':img:' + idx);
+
+if (bulletOpt) {
+const centerX = baseLeft + Math.max(bulletOffset, bulletRadius * 2);
+const bulletLeft = centerX - bulletRadius;
+const bulletTop = y + (item.height - bulletRadius * 2) / 2;
+const bulletShape = page.insertShape(SlidesApp.ShapeType.ELLIPSE, bulletLeft, bulletTop, bulletRadius * 2, bulletRadius * 2);
+bulletShape.getFill().setSolidFill(bulletColor);
+bulletShape.getBorder().setTransparent();
+if (markerPrefix) bulletShape.setTitle(markerPrefix + ':bullet:' + idx);
+}
+
+y += item.height + gap;
+});
+
+try { target.getText().setText(''); } catch (e) {}
+
+return true;
+} catch (err) {
+created.forEach(item => {
+try { item.image.remove(); } catch (e) {}
+});
+return false;
+}
+}
+
+function tryRenderTexContent(target, rawText, baseOpt) {
+const formulas = extractTexExpressions(String(rawText || ''));
+if (!formulas || formulas.length === 0) {
+clearTexArtifacts(target);
+return false;
+}
+const texOptions = {
+allowUpscale: true,
+maxUpscale: 1.8,
+paddingTop: 6,
+paddingBottom: 6,
+paddingLeft: baseOpt && typeof baseOpt.texPaddingLeft === 'number' ? baseOpt.texPaddingLeft : 6,
+paddingRight: baseOpt && typeof baseOpt.texPaddingRight === 'number' ? baseOpt.texPaddingRight : 6,
+gap: 12
+};
+return renderTexStack(target, formulas, texOptions);
+}
+
 function setStyledText(shapeOrCell, rawText, baseOpt) {
+if (tryRenderTexContent(shapeOrCell, rawText, baseOpt)) return;
 const parsed = parseInlineStyles(rawText || '');
 const tr = shapeOrCell.getText();
 tr.setText(parsed.output);
@@ -1856,6 +2111,32 @@ applyStyleRanges(tr, parsed.ranges);
 }
 
 function setBulletsWithInlineStyles(shape, points) {
+const items = (points || []).map(pt => String(pt || ''));
+const texGroups = items.map(text => extractTexExpressions(text));
+if (items.length > 0 && texGroups.every(group => group.length === 1)) {
+try {
+const width = typeof shape.getWidth === 'function' ? shape.getWidth() : 0;
+const baseIndent = width ? Math.max(12, width * 0.06) : 18;
+const options = {
+allowUpscale: true,
+maxUpscale: 1.6,
+paddingTop: 6,
+paddingBottom: 6,
+paddingLeft: baseIndent + (width ? Math.max(12, width * 0.05) : 18),
+paddingRight: 6,
+gap: 12,
+bullet: {
+radius: 3.2,
+color: CONFIG.COLORS.text_primary,
+centerOffset: baseIndent
+}
+};
+if (renderTexStack(shape, texGroups.map(g => g[0]), options)) return;
+} catch (e) {}
+}
+
+clearTexArtifacts(shape);
+
 const joiner = '\n\n';
 let combined = '';
 const ranges = [];
